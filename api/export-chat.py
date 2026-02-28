@@ -9,10 +9,10 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from lxml import etree
-import copy
 
 MATH_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
 
 def make_el(ns, tag):
     return etree.Element(f'{{{ns}}}{tag}')
@@ -337,6 +337,7 @@ def parse_latex(latex):
                 i = after
                 continue
 
+            # Unknown command — just render name
             elements.append(make_run(cmd[1:], italic=False))
             i = j
             continue
@@ -377,6 +378,7 @@ def parse_latex(latex):
                 i = after
             continue
 
+        # Regular characters
         text = ''
         while i < len(s) and s[i] not in '\\{}^_$ \t':
             ch = s[i]
@@ -481,6 +483,61 @@ def add_block_formula(doc, latex):
     insert_math(p, latex)
 
 
+def merge_multiline_formulas(content):
+    """Pre-process content to merge multi-line $$ formulas into single lines."""
+    lines = content.split('\n')
+    merged = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Case 1: standalone $$ on its own line — start of block formula
+        if stripped == '$$':
+            formula_parts = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != '$$':
+                formula_parts.append(lines[i].strip())
+                i += 1
+            latex = ' '.join(formula_parts).strip()
+            if latex:
+                merged.append(f'$${latex}$$')
+            i += 1  # skip closing $$
+            continue
+
+        # Case 2: line starts with $$ but doesn't end with $$
+        if stripped.startswith('$$') and not stripped.endswith('$$'):
+            formula_parts = [stripped[2:].strip()]
+            i += 1
+            found_end = False
+            while i < len(lines):
+                current = lines[i].strip()
+                if current.endswith('$$'):
+                    formula_parts.append(current[:-2].strip())
+                    found_end = True
+                    i += 1
+                    break
+                elif current == '$$':
+                    found_end = True
+                    i += 1
+                    break
+                else:
+                    formula_parts.append(current)
+                    i += 1
+            latex = ' '.join(p for p in formula_parts if p).strip()
+            if latex:
+                merged.append(f'$${latex}$$')
+            if not found_end:
+                pass  # unclosed formula, best effort
+            continue
+
+        # Case 3: single line $$...$$ — keep as is
+        merged.append(line)
+        i += 1
+
+    return '\n'.join(merged)
+
+
 class handler(BaseHTTPRequestHandler):
 
     def _cors(self):
@@ -511,6 +568,12 @@ class handler(BaseHTTPRequestHandler):
             tests['greek'] = f'OK ({len(list(omath3))} children)'
             omath4 = build_omath(r'\nu RT \ln(V_2/V_1)')
             tests['ln'] = f'OK ({len(list(omath4))} children)'
+
+            # Test multi-line merge
+            test_content = "$$\\frac{a}{b}\n= c$$"
+            merged = merge_multiline_formulas(test_content)
+            tests['multiline_merge'] = f'OK: {repr(merged)}'
+
             test = 'ALL OK'
         except Exception as e:
             test = f'Error: {str(e)}'
@@ -518,7 +581,7 @@ class handler(BaseHTTPRequestHandler):
 
         r = json.dumps({
             'status': 'OK',
-            'version': '5.0-chatgpt-export',
+            'version': '6.0-multiline-fix',
             'math_test': test,
             'tests': tests
         })
@@ -550,7 +613,7 @@ class handler(BaseHTTPRequestHandler):
             dp.alignment = WD_ALIGN_PARAGRAPH.CENTER
             doc.add_paragraph()
 
-            for i, msg in enumerate(messages):
+            for idx, msg in enumerate(messages):
                 role = msg.get('role', 'user')
                 content = msg.get('content', '')
 
@@ -562,7 +625,7 @@ class handler(BaseHTTPRequestHandler):
 
                 self._process(doc, content)
 
-                if i < len(messages) - 1:
+                if idx < len(messages) - 1:
                     sp = doc.add_paragraph()
                     sr = sp.add_run('─' * 60)
                     sr.font.color.rgb = RGBColor(200, 200, 200)
@@ -586,98 +649,59 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'error': str(e), 'trace': traceback.format_exc()}).encode())
 
-           def _process(self, doc, content):
-        # Первый проход: объединяем многострочные $$ формулы
+    def _process(self, doc, content):
+        # Step 1: merge multi-line $$ formulas
+        content = merge_multiline_formulas(content)
+
+        # Step 2: process line by line
         lines = content.split('\n')
-        merged_lines = []
         i = 0
         while i < len(lines):
             line = lines[i]
-            
-            # Случай 1: $$ на отдельной строке — начало блочной формулы
-            if line.strip() == '$$':
-                formula_parts = []
-                i += 1
-                while i < len(lines) and lines[i].strip() != '$$':
-                    formula_parts.append(lines[i])
-                    i += 1
-                latex = ' '.join(formula_parts).strip()
-                if latex:
-                    merged_lines.append(f'$${latex}$$')
-                i += 1  # пропускаем закрывающий $$
-                continue
-            
-            # Случай 2: строка НАЧИНАЕТСЯ с $$ но не заканчивается на $$
-            # (многострочная формула где $$ в начале первой строки)
-            if line.strip().startswith('$$') and not line.strip().endswith('$$'):
-                formula_parts = [line.strip()[2:]]  # убираем начальный $$
-                i += 1
-                while i < len(lines):
-                    current = lines[i]
-                    if current.strip().endswith('$$'):
-                        # Нашли конец формулы
-                        formula_parts.append(current.strip()[:-2])  # убираем конечный $$
-                        break
-                    else:
-                        formula_parts.append(current)
-                    i += 1
-                latex = ' '.join(p.strip() for p in formula_parts).strip()
-                if latex:
-                    merged_lines.append(f'$${latex}$$')
-                i += 1
-                continue
-            
-            merged_lines.append(line)
-            i += 1
-        
-        # Второй проход: обрабатываем объединённые строки
-        i = 0
-        while i < len(merged_lines):
-            line = merged_lines[i]
-            
-            # Изображения
+
+            # Images
             img = re.search(r'!\[([^\]]*)\]\(([^\)]+)\)', line)
             if img:
                 self._img(doc, img.group(2), img.group(1))
                 i += 1
                 continue
-            
-            # Блоки кода
+
+            # Code blocks
             if line.strip().startswith('```'):
                 code = []
                 i += 1
-                while i < len(merged_lines) and not merged_lines[i].strip().startswith('```'):
-                    code.append(merged_lines[i])
+                while i < len(lines) and not lines[i].strip().startswith('```'):
+                    code.append(lines[i])
                     i += 1
                 self._code(doc, '\n'.join(code))
                 i += 1
                 continue
-            
-            # Таблицы
+
+            # Tables
             if '|' in line and line.strip().startswith('|'):
                 tlines = []
-                while i < len(merged_lines) and '|' in merged_lines[i]:
-                    if not re.match(r'^\s*\|[\s\-:|]+\|\s*$', merged_lines[i]):
-                        tlines.append(merged_lines[i])
+                while i < len(lines) and '|' in lines[i]:
+                    if not re.match(r'^\s*\|[\s\-:|]+\|\s*$', lines[i]):
+                        tlines.append(lines[i])
                     i += 1
                 if tlines:
                     self._table_with_math(doc, tlines)
                 continue
-            
-            # Блочная формула на одной строке: $$...$$
+
+            # Block formula: $$...$$
             bm = re.match(r'^\s*\$\$(.+?)\$\$\s*$', line, re.DOTALL)
             if bm:
                 add_block_formula(doc, bm.group(1).strip())
                 i += 1
                 continue
-            
-            # Обычный текст (возможно с inline $формулами$)
+
+            # Regular text with possible inline $math$
             if line.strip():
                 self._text_math(doc, line)
             else:
                 doc.add_paragraph()
             i += 1
-            
+
     def _text_math(self, doc, text):
         parts = re.split(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', text)
         if len(parts) <= 1:
@@ -740,7 +764,8 @@ class handler(BaseHTTPRequestHandler):
                 iparts = re.split(r'\*(.+?)\*', bp)
                 for j, ip in enumerate(iparts):
                     if j % 2 == 0:
-                        if ip: para.add_run(ip)
+                        if ip:
+                            para.add_run(ip)
                     else:
                         r = para.add_run(ip)
                         r.italic = True
@@ -759,7 +784,8 @@ class handler(BaseHTTPRequestHandler):
 
     def _img(self, doc, src, alt=''):
         try:
-            import urllib.request, base64
+            import urllib.request
+            import base64
             if src.startswith('data:image'):
                 b64 = src.split('base64,')[1]
                 stream = io.BytesIO(base64.b64decode(b64))
@@ -770,7 +796,7 @@ class handler(BaseHTTPRequestHandler):
             p = doc.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.add_run().add_picture(stream, width=Inches(5.0))
-        except:
+        except Exception:
             p = doc.add_paragraph()
             r = p.add_run(f'[Image: {alt}]')
             r.italic = True
