@@ -586,62 +586,97 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'error': str(e), 'trace': traceback.format_exc()}).encode())
 
-    def _process(self, doc, content):
+        def _process(self, doc, content):
+        # Первый проход: объединяем многострочные $$ формулы
         lines = content.split('\n')
+        merged_lines = []
         i = 0
         while i < len(lines):
             line = lines[i]
-
+            
+            # Случай 1: $$ на отдельной строке — начало блочной формулы
+            if line.strip() == '$$':
+                formula_parts = []
+                i += 1
+                while i < len(lines) and lines[i].strip() != '$$':
+                    formula_parts.append(lines[i])
+                    i += 1
+                latex = ' '.join(formula_parts).strip()
+                if latex:
+                    merged_lines.append(f'$${latex}$$')
+                i += 1  # пропускаем закрывающий $$
+                continue
+            
+            # Случай 2: строка НАЧИНАЕТСЯ с $$ но не заканчивается на $$
+            # (многострочная формула где $$ в начале первой строки)
+            if line.strip().startswith('$$') and not line.strip().endswith('$$'):
+                formula_parts = [line.strip()[2:]]  # убираем начальный $$
+                i += 1
+                while i < len(lines):
+                    current = lines[i]
+                    if current.strip().endswith('$$'):
+                        # Нашли конец формулы
+                        formula_parts.append(current.strip()[:-2])  # убираем конечный $$
+                        break
+                    else:
+                        formula_parts.append(current)
+                    i += 1
+                latex = ' '.join(p.strip() for p in formula_parts).strip()
+                if latex:
+                    merged_lines.append(f'$${latex}$$')
+                i += 1
+                continue
+            
+            merged_lines.append(line)
+            i += 1
+        
+        # Второй проход: обрабатываем объединённые строки
+        i = 0
+        while i < len(merged_lines):
+            line = merged_lines[i]
+            
+            # Изображения
             img = re.search(r'!\[([^\]]*)\]\(([^\)]+)\)', line)
             if img:
                 self._img(doc, img.group(2), img.group(1))
                 i += 1
                 continue
-
+            
+            # Блоки кода
             if line.strip().startswith('```'):
                 code = []
                 i += 1
-                while i < len(lines) and not lines[i].strip().startswith('```'):
-                    code.append(lines[i])
+                while i < len(merged_lines) and not merged_lines[i].strip().startswith('```'):
+                    code.append(merged_lines[i])
                     i += 1
                 self._code(doc, '\n'.join(code))
                 i += 1
                 continue
-
+            
+            # Таблицы
             if '|' in line and line.strip().startswith('|'):
                 tlines = []
-                while i < len(lines) and '|' in lines[i]:
-                    if not re.match(r'^\s*\|[\s\-:|]+\|\s*$', lines[i]):
-                        tlines.append(lines[i])
+                while i < len(merged_lines) and '|' in merged_lines[i]:
+                    if not re.match(r'^\s*\|[\s\-:|]+\|\s*$', merged_lines[i]):
+                        tlines.append(merged_lines[i])
                     i += 1
                 if tlines:
                     self._table_with_math(doc, tlines)
                 continue
-
-            bm = re.match(r'^\s*\$\$(.+?)\$\$\s*$', line)
+            
+            # Блочная формула на одной строке: $$...$$
+            bm = re.match(r'^\s*\$\$(.+?)\$\$\s*$', line, re.DOTALL)
             if bm:
                 add_block_formula(doc, bm.group(1).strip())
                 i += 1
                 continue
-
-            if line.strip() == '$$':
-                fl = []
-                i += 1
-                while i < len(lines) and lines[i].strip() != '$$':
-                    fl.append(lines[i])
-                    i += 1
-                latex = ' '.join(fl).strip()
-                if latex:
-                    add_block_formula(doc, latex)
-                i += 1
-                continue
-
+            
+            # Обычный текст (возможно с inline $формулами$)
             if line.strip():
                 self._text_math(doc, line)
             else:
                 doc.add_paragraph()
             i += 1
-
     def _text_math(self, doc, text):
         parts = re.split(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', text)
         if len(parts) <= 1:
