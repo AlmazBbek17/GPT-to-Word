@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "src": "api/export-chat.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/export-chat",
+      "dest": "/api/export-chat.py"
+    }
+  ]
+}
