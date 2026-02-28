@@ -586,7 +586,7 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'error': str(e), 'trace': traceback.format_exc()}).encode())
 
-        def _process(self, doc, content):
+           def _process(self, doc, content):
         # Первый проход: объединяем многострочные $$ формулы
         lines = content.split('\n')
         merged_lines = []
@@ -677,6 +677,7 @@ class handler(BaseHTTPRequestHandler):
             else:
                 doc.add_paragraph()
             i += 1
+            
     def _text_math(self, doc, text):
         parts = re.split(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', text)
         if len(parts) <= 1:
