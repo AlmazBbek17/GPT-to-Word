@@ -337,7 +337,6 @@ def parse_latex(latex):
                 i = after
                 continue
 
-            # Unknown command — just render name
             elements.append(make_run(cmd[1:], italic=False))
             i = j
             continue
@@ -378,7 +377,6 @@ def parse_latex(latex):
                 i = after
             continue
 
-        # Regular characters
         text = ''
         while i < len(s) and s[i] not in '\\{}^_$ \t':
             ch = s[i]
@@ -484,7 +482,6 @@ def add_block_formula(doc, latex):
 
 
 def merge_multiline_formulas(content):
-    """Pre-process content to merge multi-line $$ formulas into single lines."""
     lines = content.split('\n')
     merged = []
     i = 0
@@ -492,7 +489,6 @@ def merge_multiline_formulas(content):
         line = lines[i]
         stripped = line.strip()
 
-        # Case 1: standalone $$ on its own line — start of block formula
         if stripped == '$$':
             formula_parts = []
             i += 1
@@ -502,10 +498,9 @@ def merge_multiline_formulas(content):
             latex = ' '.join(formula_parts).strip()
             if latex:
                 merged.append(f'$${latex}$$')
-            i += 1  # skip closing $$
+            i += 1
             continue
 
-        # Case 2: line starts with $$ but doesn't end with $$
         if stripped.startswith('$$') and not stripped.endswith('$$'):
             formula_parts = [stripped[2:].strip()]
             i += 1
@@ -527,11 +522,8 @@ def merge_multiline_formulas(content):
             latex = ' '.join(p for p in formula_parts if p).strip()
             if latex:
                 merged.append(f'$${latex}$$')
-            if not found_end:
-                pass  # unclosed formula, best effort
             continue
 
-        # Case 3: single line $$...$$ — keep as is
         merged.append(line)
         i += 1
 
@@ -569,7 +561,6 @@ class handler(BaseHTTPRequestHandler):
             omath4 = build_omath(r'\nu RT \ln(V_2/V_1)')
             tests['ln'] = f'OK ({len(list(omath4))} children)'
 
-            # Test multi-line merge
             test_content = "$$\\frac{a}{b}\n= c$$"
             merged = merge_multiline_formulas(test_content)
             tests['multiline_merge'] = f'OK: {repr(merged)}'
@@ -581,7 +572,7 @@ class handler(BaseHTTPRequestHandler):
 
         r = json.dumps({
             'status': 'OK',
-            'version': '6.0-multiline-fix',
+            'version': '7.0-gpt-bold-lists-fix',
             'math_test': test,
             'tests': tests
         })
@@ -650,10 +641,8 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({'error': str(e), 'trace': traceback.format_exc()}).encode())
 
     def _process(self, doc, content):
-        # Step 1: merge multi-line $$ formulas
         content = merge_multiline_formulas(content)
 
-        # Step 2: process line by line
         lines = content.split('\n')
         i = 0
         while i < len(lines):
@@ -695,6 +684,33 @@ class handler(BaseHTTPRequestHandler):
                 i += 1
                 continue
 
+            # Headings: ### text
+            hm = re.match(r'^(#{1,6})\s+(.+)$', line.strip())
+            if hm:
+                level = len(hm.group(1))
+                heading_text = hm.group(2).strip()
+                h = doc.add_heading(level=min(level, 4))
+                # Process bold/italic in heading
+                self._fmt(h, heading_text)
+                i += 1
+                continue
+
+            # Bullet list: • text or - text or * text (not bold marker)
+            lm = re.match(r'^\s*[•\-\*]\s+(.+)$', line)
+            if lm and not line.strip().startswith('**'):
+                p = doc.add_paragraph(style='List Bullet')
+                self._text_math_para(p, lm.group(1).strip())
+                i += 1
+                continue
+
+            # Numbered list: 1. text
+            nm = re.match(r'^\s*(\d+)\.\s+(.+)$', line)
+            if nm:
+                p = doc.add_paragraph(style='List Number')
+                self._text_math_para(p, nm.group(2).strip())
+                i += 1
+                continue
+
             # Regular text with possible inline $math$
             if line.strip():
                 self._text_math(doc, line)
@@ -703,12 +719,12 @@ class handler(BaseHTTPRequestHandler):
             i += 1
 
     def _text_math(self, doc, text):
+        """Add a new paragraph with text that may contain inline math."""
         parts = re.split(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', text)
+        p = doc.add_paragraph()
         if len(parts) <= 1:
-            p = doc.add_paragraph()
             self._fmt(p, text)
             return
-        p = doc.add_paragraph()
         for idx, part in enumerate(parts):
             if idx % 2 == 0:
                 if part:
@@ -716,19 +732,30 @@ class handler(BaseHTTPRequestHandler):
             else:
                 insert_math(p, part.strip())
 
+    def _text_math_para(self, para, text):
+        """Add content to an existing paragraph (for list items)."""
+        parts = re.split(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', text)
+        if len(parts) <= 1:
+            self._fmt(para, text)
+            return
+        for idx, part in enumerate(parts):
+            if idx % 2 == 0:
+                if part:
+                    self._fmt(para, part)
+            else:
+                insert_math(para, part.strip())
+
     def _add_cell_content_with_math(self, cell, text):
         text = text.strip()
         parts = re.split(r'(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)', text)
         para = cell.paragraphs[0]
         if len(parts) <= 1:
-            run = para.add_run(text)
-            run.font.size = Pt(11)
+            self._fmt(para, text)
             return
         for idx, part in enumerate(parts):
             if idx % 2 == 0:
                 if part.strip():
-                    run = para.add_run(part)
-                    run.font.size = Pt(11)
+                    self._fmt(para, part)
             else:
                 insert_math(para, part.strip())
 
@@ -748,30 +775,30 @@ class handler(BaseHTTPRequestHandler):
             for j, ct in enumerate(rd):
                 if j < mc:
                     cell = t.rows[i].cells[j]
-                    if '$' in ct:
-                        self._add_cell_content_with_math(cell, ct)
-                    else:
-                        run = cell.paragraphs[0].add_run(ct)
-                        run.font.size = Pt(11)
+                    self._add_cell_content_with_math(cell, ct)
                     if i == 0:
                         for run in cell.paragraphs[0].runs:
                             run.bold = True
 
     def _fmt(self, para, text):
+        """Parse **bold** and *italic* markdown and add runs to paragraph."""
+        # Split by **bold**
         bparts = re.split(r'\*\*(.+?)\*\*', text)
         for i, bp in enumerate(bparts):
-            if i % 2 == 0:
-                iparts = re.split(r'\*(.+?)\*', bp)
-                for j, ip in enumerate(iparts):
-                    if j % 2 == 0:
-                        if ip:
-                            para.add_run(ip)
-                    else:
-                        r = para.add_run(ip)
-                        r.italic = True
-            else:
+            if i % 2 == 1:
+                # Bold part
                 r = para.add_run(bp)
                 r.bold = True
+            else:
+                # May contain *italic*
+                iparts = re.split(r'\*(.+?)\*', bp)
+                for j, ip in enumerate(iparts):
+                    if j % 2 == 1:
+                        r = para.add_run(ip)
+                        r.italic = True
+                    else:
+                        if ip:
+                            para.add_run(ip)
 
     def _code(self, doc, code):
         p = doc.add_paragraph()
